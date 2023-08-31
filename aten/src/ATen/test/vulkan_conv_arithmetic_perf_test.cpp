@@ -16,6 +16,13 @@
 namespace {
 
 namespace vulkan_api = at::native::vulkan::api;
+
+#if defined(USE_VULKAN_GPU_DIAGNOSTICS) && defined(__ANDROID__)
+static const float NANOSECONDS_IN_SECOND = 1000000000.0;
+#endif
+
+
+#if defined(USE_VULKAN_GPU_DIAGNOSTICS) && defined(__ANDROID__)
 void report_pep(const std::string& name, const uint64_t duration) {
   std::stringstream buffer;
   buffer << "PyTorchObserver {\"type\": \"";
@@ -30,7 +37,10 @@ void report_pep(const std::string& name, const uint64_t duration) {
   buffer << "}\n";
   std::cout << buffer.str();
 }
+#endif
 
+
+#if defined(USE_VULKAN_GPU_DIAGNOSTICS) && defined(__ANDROID__)
 void report_aibench_res(vulkan_api::QueryPool& qpool) {
   std::unordered_map<std::string, uint64_t> shader_runtimes;
   uint64_t num_additions = 0;
@@ -50,6 +60,19 @@ void report_aibench_res(vulkan_api::QueryPool& qpool) {
     report_pep(name, duration);
   }
 }
+#endif
+
+#if defined(USE_VULKAN_GPU_DIAGNOSTICS) && defined(__ANDROID__)
+static void extractTotalOpResultsAndSetState(
+    benchmark::State& state,
+    const char* op_name) {
+  at::native::vulkan::api::context()->querypool().extract_results();
+  float total_op_time =
+      at::native::vulkan::api::context()->querypool().get_total_op_ns(op_name) /
+      NANOSECONDS_IN_SECOND;
+  state.SetIterationTime(total_op_time);
+}
+#endif
 
 at::Tensor vulkan_to_cpu(at::Tensor vulkan, at::Tensor in_cpu) {
   auto q_options = in_cpu.options();
@@ -108,18 +131,11 @@ static void add_op_benchmark(benchmark::State& state) {
 
   // Act
   for (auto _ : state) {
-    auto start = std::chrono::high_resolution_clock::now();
     const auto vulkan_out = at::add(in_vulkan1, in_vulkan2).cpu();
-    auto end = std::chrono::high_resolution_clock::now();
-    auto elapsed =
-        std::chrono::duration_cast<std::chrono::duration<double>>(end - start);
-    state.SetIterationTime(elapsed.count());
   }
-
 #if defined(USE_VULKAN_GPU_DIAGNOSTICS) && defined(__ANDROID__)
-  at::native::vulkan::api::context()->querypool().extract_results();
+  extractTotalOpResultsAndSetState(state, "vulkan.add");
   at::native::vulkan::api::context()->querypool().print_results();
-  state.SetIterationTime(at::native::vulkan::api::context()->querypool().get_total_op_ns("add") / 1000000.0);
 #endif
 }
 
@@ -160,20 +176,13 @@ static void add_op_q_benchmark(benchmark::State& state) {
   const double scale2 = 0.15;
   const int zero_point2 = 15;
   for (auto _ : state) {
-    auto start = std::chrono::high_resolution_clock::now();
     const auto vulkan_add = at::native::vulkan::ops::quantized_add(
         out_vulkan1, out_vulkan2, scale2, zero_point2);
     const auto vulkan_out = vulkan_to_cpu(vulkan_add, out_cpu1);
-    auto end = std::chrono::high_resolution_clock::now();
-    auto elapsed =
-        std::chrono::duration_cast<std::chrono::duration<double>>(end - start);
-    state.SetIterationTime(elapsed.count());
   }
-
 #if defined(USE_VULKAN_GPU_DIAGNOSTICS) && defined(__ANDROID__)
-  at::native::vulkan::api::context()->querypool().extract_results();
+  extractTotalOpResultsAndSetState(state, "vulkan.quantized_add");
   at::native::vulkan::api::context()->querypool().print_results();
-  state.SetIterationTime(at::native::vulkan::api::context()->querypool().get_total_op_ns("quantized_add") / 1000000.0);
 #endif
 }
 
@@ -240,7 +249,6 @@ static void conv2d_op_benchmark(benchmark::State& state) {
 
   // Act
   for (auto _ : state) {
-    auto start = std::chrono::high_resolution_clock::now();
     const auto vulkan_out = at::conv2d(
                                 input_cpu.vulkan(),
                                 weights_cpu,
@@ -250,16 +258,11 @@ static void conv2d_op_benchmark(benchmark::State& state) {
                                 dilation,
                                 groups)
                                 .cpu();
-    auto end = std::chrono::high_resolution_clock::now();
-    auto elapsed =
-        std::chrono::duration_cast<std::chrono::duration<double>>(end - start);
-    state.SetIterationTime(elapsed.count());
   }
 
 #if defined(USE_VULKAN_GPU_DIAGNOSTICS) && defined(__ANDROID__)
-  at::native::vulkan::api::context()->querypool().extract_results();
+  extractTotalOpResultsAndSetState(state, "vulkan.conv2d");
   at::native::vulkan::api::context()->querypool().print_results();
-  state.SetIterationTime(at::native::vulkan::api::context()->querypool().get_total_op_ns("conv2d") / 1000000.0);
 #endif
 }
 
@@ -335,7 +338,6 @@ static void conv2d_op_q_benchmark(benchmark::State& state) {
   const int zero_point = 10;
   const auto out_vulkan1 = at::native::vulkan::ops::quantize_per_tensor(
       in_vulkan1, scale, zero_point, c10::ScalarType::QUInt8);
-
 #if defined(USE_VULKAN_GPU_DIAGNOSTICS) && defined(__ANDROID__)
   at::native::vulkan::api::context()->enable_op_profiling();
   at::native::vulkan::api::context()->reset_querypool();
@@ -347,7 +349,6 @@ static void conv2d_op_q_benchmark(benchmark::State& state) {
   const auto shape_match =
       at::rand({1, 1, 64, 199}, at::device(at::kCPU).dtype(at::kFloat)) * 6;
   for (auto _ : state) {
-    auto start = std::chrono::high_resolution_clock::now();
     const auto vulkan_conv2d = at::native::vulkan::ops::quantized_conv2d(
         out_vulkan1,
         weight_q,
@@ -359,16 +360,10 @@ static void conv2d_op_q_benchmark(benchmark::State& state) {
         scale2,
         zero_point2);
     const auto vulkan_out = vulkan_to_cpu(vulkan_conv2d, shape_match);
-    auto end = std::chrono::high_resolution_clock::now();
-    auto elapsed =
-        std::chrono::duration_cast<std::chrono::duration<double>>(end - start);
-    state.SetIterationTime(elapsed.count());
   }
-
 #if defined(USE_VULKAN_GPU_DIAGNOSTICS) && defined(__ANDROID__)
-  at::native::vulkan::api::context()->querypool().extract_results();
+  extractTotalOpResultsAndSetState(state, "vulkan.quantized_conv2d");
   at::native::vulkan::api::context()->querypool().print_results();
-  state.SetIterationTime(at::native::vulkan::api::context()->querypool().get_total_op_ns("quantized_conv2d") / 1000000.0);
 #endif
 }
 
@@ -434,7 +429,6 @@ static void conv2dpw_op_benchmark(benchmark::State& state) {
 
   // Act
   for (auto _ : state) {
-    auto start = std::chrono::high_resolution_clock::now();
     const auto vulkan_out = at::conv2d(
                                 input_cpu.vulkan(),
                                 weights_cpu,
@@ -444,16 +438,10 @@ static void conv2dpw_op_benchmark(benchmark::State& state) {
                                 dilation,
                                 groups)
                                 .cpu();
-    auto end = std::chrono::high_resolution_clock::now();
-    auto elapsed =
-        std::chrono::duration_cast<std::chrono::duration<double>>(end - start);
-    state.SetIterationTime(elapsed.count());
   }
-
 #if defined(USE_VULKAN_GPU_DIAGNOSTICS) && defined(__ANDROID__)
-  at::native::vulkan::api::context()->querypool().extract_results();
+  extractTotalOpResultsAndSetState(state, "vulkan.conv2d_pw_2x2");
   at::native::vulkan::api::context()->querypool().print_results();
-  state.SetIterationTime(at::native::vulkan::api::context()->querypool().get_total_op_ns("conv2d_pw_2x2") / 1000000.0);
 #endif
 }
 
@@ -540,7 +528,6 @@ static void conv2dpw_op_q_benchmark(benchmark::State& state) {
   const auto shape_match =
       at::rand({1, 29, 127, 397}, at::device(at::kCPU).dtype(at::kFloat)) * 6;
   for (auto _ : state) {
-    auto start = std::chrono::high_resolution_clock::now();
     const auto vulkan_conv2d = at::native::vulkan::ops::quantized_conv2d(
         out_vulkan1,
         weight_q,
@@ -552,16 +539,10 @@ static void conv2dpw_op_q_benchmark(benchmark::State& state) {
         scale2,
         zero_point2);
     const auto vulkan_out = vulkan_to_cpu(vulkan_conv2d, shape_match);
-    auto end = std::chrono::high_resolution_clock::now();
-    auto elapsed =
-        std::chrono::duration_cast<std::chrono::duration<double>>(end - start);
-    state.SetIterationTime(elapsed.count());
   }
-
 #if defined(USE_VULKAN_GPU_DIAGNOSTICS) && defined(__ANDROID__)
-  at::native::vulkan::api::context()->querypool().extract_results();
+  extractTotalOpResultsAndSetState(state, "vulkan.quantized_conv2d_pw_2x2");
   at::native::vulkan::api::context()->querypool().print_results();
-  state.SetIterationTime(at::native::vulkan::api::context()->querypool().get_total_op_ns("quantized_conv2d_pw_2x2") / 1000000.0);
 #endif
 }
 
@@ -626,7 +607,6 @@ static void conv2ddw_op_benchmark(benchmark::State& state) {
 
   // Act
   for (auto _ : state) {
-    auto start = std::chrono::high_resolution_clock::now();
     const auto vulkan_out = at::conv2d(
                                 input_cpu.vulkan(),
                                 weights_cpu,
@@ -636,17 +616,11 @@ static void conv2ddw_op_benchmark(benchmark::State& state) {
                                 dilation,
                                 groups)
                                 .cpu();
-    auto end = std::chrono::high_resolution_clock::now();
-    auto elapsed =
-        std::chrono::duration_cast<std::chrono::duration<double>>(end - start);
-    state.SetIterationTime(elapsed.count());
   }
-
 #if defined(USE_VULKAN_GPU_DIAGNOSTICS) && defined(__ANDROID__)
-  at::native::vulkan::api::context()->querypool().extract_results();
+  extractTotalOpResultsAndSetState(state, "vulkan.conv2d_dw");
   at::native::vulkan::api::context()->querypool().print_results();
   report_aibench_res(vulkan_api::context()->querypool());
-  state.SetIterationTime(at::native::vulkan::api::context()->querypool().get_total_op_ns("conv2d_dw") / 1000000.0);
 #endif
 }
 
@@ -720,7 +694,6 @@ static void conv2ddw_op_q_benchmark(benchmark::State& state) {
   const int zero_point = 10;
   const auto out_vulkan1 = at::native::vulkan::ops::quantize_per_tensor(
       in_vulkan1, scale, zero_point, c10::ScalarType::QUInt8);
-
 #if defined(USE_VULKAN_GPU_DIAGNOSTICS) && defined(__ANDROID__)
   at::native::vulkan::api::context()->enable_op_profiling();
   at::native::vulkan::api::context()->reset_querypool();
@@ -732,7 +705,6 @@ static void conv2ddw_op_q_benchmark(benchmark::State& state) {
   const auto shape_match =
       at::rand({1, 7, 45, 67}, at::device(at::kCPU).dtype(at::kFloat)) * 6;
   for (auto _ : state) {
-    auto start = std::chrono::high_resolution_clock::now();
     const auto vulkan_conv2d = at::native::vulkan::ops::quantized_conv2d(
         out_vulkan1,
         weight_q,
@@ -744,16 +716,10 @@ static void conv2ddw_op_q_benchmark(benchmark::State& state) {
         scale2,
         zero_point2);
     const auto vulkan_out = vulkan_to_cpu(vulkan_conv2d, shape_match);
-    auto end = std::chrono::high_resolution_clock::now();
-    auto elapsed =
-        std::chrono::duration_cast<std::chrono::duration<double>>(end - start);
-    state.SetIterationTime(elapsed.count());
   }
-
 #if defined(USE_VULKAN_GPU_DIAGNOSTICS) && defined(__ANDROID__)
-  at::native::vulkan::api::context()->querypool().extract_results();
+  extractTotalOpResultsAndSetState(state, "vulkan.quantized_conv2d_dw");
   at::native::vulkan::api::context()->querypool().print_results();
-  state.SetIterationTime(at::native::vulkan::api::context()->querypool().get_total_op_ns("quantized_conv2d_dw") / 1000000.0);
 #endif
 }
 
@@ -784,18 +750,11 @@ static void sub_op_benchmark(benchmark::State& state) {
 
   // Act
   for (auto _ : state) {
-    auto start = std::chrono::high_resolution_clock::now();
     const auto vulkan_out = at::sub(in_vulkan1, in_vulkan2).cpu();
-    auto end = std::chrono::high_resolution_clock::now();
-    auto elapsed =
-        std::chrono::duration_cast<std::chrono::duration<double>>(end - start);
-    state.SetIterationTime(elapsed.count());
   }
-
 #if defined(USE_VULKAN_GPU_DIAGNOSTICS) && defined(__ANDROID__)
-  at::native::vulkan::api::context()->querypool().extract_results();
+  extractTotalOpResultsAndSetState(state, "vulkan.sub");
   at::native::vulkan::api::context()->querypool().print_results();
-  state.SetIterationTime(at::native::vulkan::api::context()->querypool().get_total_op_ns("sub") / 1000000.0);
 #endif
 }
 
@@ -836,20 +795,14 @@ static void sub_op_q_benchmark(benchmark::State& state) {
   const double scale2 = 0.15;
   const int zero_point2 = 15;
   for (auto _ : state) {
-    auto start = std::chrono::high_resolution_clock::now();
     const auto vulkan_sub = at::native::vulkan::ops::quantized_sub(
         out_vulkan1, out_vulkan2, scale2, zero_point2);
     const auto vulkan_out = vulkan_to_cpu(vulkan_sub, out_cpu1);
-    auto end = std::chrono::high_resolution_clock::now();
-    auto elapsed =
-        std::chrono::duration_cast<std::chrono::duration<double>>(end - start);
-    state.SetIterationTime(elapsed.count());
   }
 
 #if defined(USE_VULKAN_GPU_DIAGNOSTICS) && defined(__ANDROID__)
-  at::native::vulkan::api::context()->querypool().extract_results();
+  extractTotalOpResultsAndSetState(state, "vulkan.quantized_sub");
   at::native::vulkan::api::context()->querypool().print_results();
-  state.SetIterationTime(at::native::vulkan::api::context()->querypool().get_total_op_ns("quantized_sub") / 1000000.0);
 #endif
 }
 
@@ -880,18 +833,11 @@ static void mul_op_benchmark(benchmark::State& state) {
 
   // Act
   for (auto _ : state) {
-    auto start = std::chrono::high_resolution_clock::now();
     const auto vulkan_out = at::mul(in_vulkan1, in_vulkan2).cpu();
-    auto end = std::chrono::high_resolution_clock::now();
-    auto elapsed =
-        std::chrono::duration_cast<std::chrono::duration<double>>(end - start);
-    state.SetIterationTime(elapsed.count());
   }
-
 #if defined(USE_VULKAN_GPU_DIAGNOSTICS) && defined(__ANDROID__)
-  at::native::vulkan::api::context()->querypool().extract_results();
+  extractTotalOpResultsAndSetState(state, "vulkan.mul");
   at::native::vulkan::api::context()->querypool().print_results();
-  state.SetIterationTime(at::native::vulkan::api::context()->querypool().get_total_op_ns("mul") / 1000000.0);
 #endif
 }
 
@@ -932,20 +878,20 @@ static void mul_op_q_benchmark(benchmark::State& state) {
   const double scale2 = 0.15;
   const int zero_point2 = 15;
   for (auto _ : state) {
-    auto start = std::chrono::high_resolution_clock::now();
     const auto vulkan_mul = at::native::vulkan::ops::quantized_mul(
         out_vulkan1, out_vulkan2, scale2, zero_point2);
     const auto vulkan_out = vulkan_to_cpu(vulkan_mul, out_cpu1);
-    auto end = std::chrono::high_resolution_clock::now();
-    auto elapsed =
-        std::chrono::duration_cast<std::chrono::duration<double>>(end - start);
-    state.SetIterationTime(elapsed.count());
   }
 
 #if defined(USE_VULKAN_GPU_DIAGNOSTICS) && defined(__ANDROID__)
+  float total_op_time =
+      at::native::vulkan::api::context()->querypool().get_total_op_ns(
+          "vulkan.quantized_mul") /
+      NANOSECONDS_IN_SECOND;
+  state.SetIterationTime(total_op_time);
+
   at::native::vulkan::api::context()->querypool().extract_results();
   at::native::vulkan::api::context()->querypool().print_results();
-  state.SetIterationTime(at::native::vulkan::api::context()->querypool().get_total_op_ns("quantized_mul") / 1000000.0);
 #endif
 }
 
@@ -976,18 +922,12 @@ static void div_op_benchmark(benchmark::State& state) {
 
   // Act
   for (auto _ : state) {
-    auto start = std::chrono::high_resolution_clock::now();
     const auto vulkan_out = at::div(in_vulkan1, in_vulkan2).cpu();
-    auto end = std::chrono::high_resolution_clock::now();
-    auto elapsed =
-        std::chrono::duration_cast<std::chrono::duration<double>>(end - start);
-    state.SetIterationTime(elapsed.count());
   }
 
 #if defined(USE_VULKAN_GPU_DIAGNOSTICS) && defined(__ANDROID__)
-  at::native::vulkan::api::context()->querypool().extract_results();
+  extractTotalOpResultsAndSetState(state, "vulkan.div");
   at::native::vulkan::api::context()->querypool().print_results();
-  state.SetIterationTime(at::native::vulkan::api::context()->querypool().get_total_op_ns("div") / 1000000.0);
 #endif
 }
 
@@ -1018,7 +958,6 @@ static void div_op_q_benchmark(benchmark::State& state) {
       in_vulkan1, scale, zero_point, c10::ScalarType::QUInt8);
   const auto out_vulkan2 = at::native::vulkan::ops::quantize_per_tensor(
       in_vulkan2, scale, zero_point, c10::ScalarType::QUInt8);
-
 #if defined(USE_VULKAN_GPU_DIAGNOSTICS) && defined(__ANDROID__)
   at::native::vulkan::api::context()->enable_op_profiling();
   at::native::vulkan::api::context()->reset_querypool();
@@ -1028,20 +967,13 @@ static void div_op_q_benchmark(benchmark::State& state) {
   const double scale2 = 0.15;
   const int zero_point2 = 15;
   for (auto _ : state) {
-    auto start = std::chrono::high_resolution_clock::now();
     const auto vulkan_div = at::native::vulkan::ops::quantized_div(
         out_vulkan1, out_vulkan2, scale2, zero_point2);
     const auto vulkan_out = vulkan_to_cpu(vulkan_div, out_cpu1);
-    auto end = std::chrono::high_resolution_clock::now();
-    auto elapsed =
-        std::chrono::duration_cast<std::chrono::duration<double>>(end - start);
-    state.SetIterationTime(elapsed.count());
   }
-
 #if defined(USE_VULKAN_GPU_DIAGNOSTICS) && defined(__ANDROID__)
-  at::native::vulkan::api::context()->querypool().extract_results();
+  extractTotalOpResultsAndSetState(state, "vulkan.quantized_div");
   at::native::vulkan::api::context()->querypool().print_results();
-  state.SetIterationTime(at::native::vulkan::api::context()->querypool().get_total_op_ns("quantized_div") / 1000000.0);
 #endif
 }
 
